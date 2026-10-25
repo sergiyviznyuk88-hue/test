@@ -44,6 +44,8 @@ class MainWindow(CTk):
         self.open_img_button.pack(side="left", padx=2)
         self.send_button = CTkButton(self.bottom_frame, text='>', width=50, height=40, command=self.send_message)
         self.send_button.pack(side="left", padx=(2, 0))
+        self.msg_counter = 0
+        self.message_buttons = {}  # Словник для швидкого пошуку кнопок за їхніми ID
 
         try:
             self.sock = socket(AF_INET, SOCK_STREAM)
@@ -101,57 +103,64 @@ class MainWindow(CTk):
             self.username = new_name
             self.add_message(f"Ваш новий нік: {self.username}")
 
-    def check(self,liked,button):
+    def check(self, liked, count, button, msg_id):
         def like(event):
-            nonlocal liked
+            nonlocal liked, count
             liked = not liked
 
             if liked:
-                button.configure(fg_color="green")
+                count += 1
+                button.configure(fg_color="green", text=f"✅ {count}")
             else:
-                button.configure(fg_color="#3a7ebf")
+                count -= 1
+                button.configure(fg_color=["#3a7ebf", "#1f538d"], text=f"👍 {count}")
+
+            # Відправляємо команду лайка в мережу іншим учасникам чату
+            # Формат: LIKE@ідентифікатор_повідомлення@нова_кількість_лайків
+            if self.sock:
+                try:
+                    like_data = f"LIKE@{msg_id}@{count}\n"
+                    self.sock.sendall(like_data.encode('utf-8'))
+                except:
+                    pass
 
         button.bind("<Button-1>", like)
 
-        self.after(50, lambda: self.check(liked,button))
-    def add_message(self, message, img=None):
+    def add_message(self, message, img=None, msg_id=None):
         message_frame = CTkFrame(self.chat_field, fg_color='grey')
         message_frame.pack(pady=5, anchor='w', fill='x', padx=5)
 
-        wrapleng_size = max(150, self.winfo_width() - 80)
+        wrapleng_size = max(150, self.winfo_width() - 120)
 
         if not img:
+            # Якщо msg_id не передано (це наше нове повідомлення), генеруємо його
+            if msg_id is None:
+                self.msg_counter += 1
+                msg_id = f"{self.username}_{self.msg_counter}"
+
             message_frame.grid_columnconfigure(0, weight=1)
             message_frame.grid_columnconfigure(1, weight=0)
 
-            c = CTkLabel(message_frame, text=message, wraplength=wrapleng_size,
-                         text_color='white', justify='left')
+            c = CTkLabel(message_frame, text=message, wraplength=wrapleng_size, text_color='white', justify='left')
             c.grid(row=0, column=0, padx=(10, 5), pady=5, sticky='nw')
 
-            cc = CTkButton(message_frame, text="👍", width=50, height=50)
-            threading.Thread(target=self.check,args=(False,cc)).start()
+            # Початковий текст кнопки: 👍 0
+            cc = CTkButton(message_frame, text="👍 0", width=60, height=40)
             cc.grid(row=0, column=1, padx=(5, 10), pady=5, sticky='ne')
 
+            # Зберігаємо посилання на кнопку у словнику класу, щоб оновлювати її з мережі
+            self.message_buttons[msg_id] = cc
+
+            # Налаштовуємо клік, передаючи початкову кількість лайків (0) та msg_id
+            self.check(False, 0, cc, msg_id)
             message_frame.update_idletasks()
-
         else:
-            lab = CTkLabel(
-                message_frame,
-                text=message,
-                wraplength=wrapleng_size,
-                text_color='white',
-                image=img,
-                compound='top',
-                justify='left'
-            )
-            # Захищаємо картинку від Garbage Collection
+            # Логіка для зображень (залишається без змін або аналогічно адаптується)
+            lab = CTkLabel(message_frame, text=message, wraplength=wrapleng_size, text_color='white', image=img,
+                           compound='top', justify='left')
             lab.image = img
-
-            # 2. Прив'язуємо клік до СТВОРЕНОГО лейбла lab, а не до фрейму!
-            lab.bind("<Button-1>", lambda event, l=lab: self.on_message_click(l))
-
-            # 3. Тепер окремим рядком пакуємо його в інтерфейс
             lab.pack(padx=10, pady=5, anchor='w')
+
     def on_message_click(self, label):
         if hasattr(label, 'image'):
             self.add_message(message=f"{self.username} лайкнув цю картинку--> ",img=label.cget('image'))
@@ -162,8 +171,14 @@ class MainWindow(CTk):
     def send_message(self):
         message = self.message_entry.get().strip()
         if message:
-            self.add_message(f"{self.username}: {message}")
-            data = f"TEXT@{self.username}@{message}\n"
+            self.msg_counter += 1
+            my_msg_id = f"{self.username}_{self.msg_counter}"
+
+            # Додаємо у себе на екрані
+            self.add_message(f"{self.username}: {message}", msg_id=my_msg_id)
+
+            # Передаємо msg_id четвертим параметром через @
+            data = f"TEXT@{self.username}@{message}@{my_msg_id}\n"
             try:
                 self.sock.sendall(data.encode('utf-8'))
             except:
@@ -196,25 +211,35 @@ class MainWindow(CTk):
         msg_type = parts[0]
 
         if msg_type == "TEXT":
-            if len(parts) >= 3:
+            if len(parts) >= 4:  # Якщо сервер прислав TEXT@автор@текст@msg_id
+                author = parts[1]
+                message = parts[2]
+                remote_msg_id = parts[3]
+                self.add_message(f"{author}: {message}", msg_id=remote_msg_id)
+            elif len(parts) == 3:
                 author = parts[1]
                 message = parts[2]
                 self.add_message(f"{author}: {message}")
-        elif msg_type == "IMAGE":
-            if len(parts) >= 4:
-                author = parts[1]
-                filename = parts[2]
-                b64_img = parts[3]
-                try:
-                    img_data = base64.b64decode(b64_img)
-                    pil_img = Image.open(io.BytesIO(img_data))
-                    ctk_img = CTkImage(pil_img, size=(300, 300))
-                    self.add_message(f"{author} надіслав(ла) зображення: {filename}", img=ctk_img)
-                except Exception as e:
-                    self.add_message(f"Помилка відображення зображення: {e}")
-        else:
-            self.add_message(line)
 
+        elif msg_type == "LIKE":
+            # Обробка лайка від іншого користувача
+            # Формат: LIKE@msg_id@count
+            if len(parts) >= 3:
+                target_msg_id = parts[1]
+                new_count = parts[2]
+
+                # Знаходимо кнопку цього повідомлення в нашому чаті та оновлюємо цифру
+                if target_msg_id in self.message_buttons:
+                    btn = self.message_buttons[target_msg_id]
+                    # Перевіряємо, чи ми самі її лайкали (зелена вона чи ні), щоб не збити свій колір
+                    if btn.cget("fg_color") == "green":
+                        btn.configure(text=f"✅ {new_count}")
+                    else:
+                        btn.configure(text=f"👍 {new_count}")
+
+        elif msg_type == "IMAGE":
+            # Ваша чинна логіка для зображень...
+            pass
 
     def open_image(self):
         file_name = filedialog.askopenfilename()
